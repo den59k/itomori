@@ -1,9 +1,33 @@
 {
   "name": "itomori",
-  "module": "index.ts",
+  "version": "0.1.0",
+  "description": "Compile a template string once into a fast, reusable (row) => string function",
   "type": "module",
-  "private": true,
-  "author": "Ваше Имя <your-email@example.com>",
+  "main": "./dist/template.js",
+  "types": "./dist/template.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/template.js",
+      "types": "./dist/template.d.ts"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/template.ts --outdir dist --target node && tsc -p tsconfig.build.json",
+    "test": "bun test",
+    "prepublishOnly": "bun test && bun run build"
+  },
+  "keywords": [
+    "template",
+    "compiler",
+    "table",
+    "renderer"
+  ],
+  "license": "MIT",
+  "author": "den59k <den59k@gmail.com>",
   "contributors": [
     "Claude Code <https://anthropic.com>"
   ],
@@ -11,11 +35,8 @@
     "type": "git",
     "url": "git+https://github.com/den59k/itomori.git"
   },
-  "files": [ "dist" ],
   "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
+    "@types/bun": "latest",
     "typescript": "^5"
   }
 }

@@ -327,7 +327,7 @@ function buildRenderFn(segments: Segment[]): (row: unknown) => string {
       const pIdx = paths.length;
       paths.push(seg.path);
       const fIdx = fns.length;
-      fns.push(registry[seg.fn]);
+      fns.push(registry[seg.fn]!);
       fnArgs.push(seg.args);
       parts.push(`fns[${fIdx}](get(row,paths[${pIdx}]),...fnArgs[${fIdx}])`);
 

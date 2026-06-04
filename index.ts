@@ -1,1 +1,1 @@
-console.log("Hello via Bun!");
+export { compileTemplate, registry } from "./src/template.ts";
