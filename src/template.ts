@@ -5,9 +5,10 @@ type Formatter = (value: unknown, ...args: unknown[]) => string;
 export const registry: Record<string, Formatter> = {};
 
 type LiteralSegment = { kind: "literal"; text: string };
-type FieldSegment = { kind: "field"; path: string[] };
-type CallSegment = { kind: "call"; fn: string; path: string[]; args: unknown[] };
-type Segment = LiteralSegment | FieldSegment | CallSegment;
+type FieldSegment   = { kind: "field";   path: string[] };
+type CallSegment    = { kind: "call";    fn: string; path: string[]; args: unknown[] };
+type JoinSegment    = { kind: "join";    path: string[]; elementTemplate: string | null; separator: string };
+type Segment = LiteralSegment | FieldSegment | CallSegment | JoinSegment;
 
 // ── Built-in formatters ───────────────────────────────────────────────────────
 
@@ -22,11 +23,11 @@ function formatDate(val: unknown, fmt: unknown = "YYYY-MM-DD"): string {
   const format = String(fmt);
   return format
     .replace("YYYY", String(d.getUTCFullYear()))
-    .replace("MM", padZ(d.getUTCMonth() + 1))
-    .replace("DD", padZ(d.getUTCDate()))
-    .replace("HH", padZ(d.getUTCHours()))
-    .replace("mm", padZ(d.getUTCMinutes()))
-    .replace("ss", padZ(d.getUTCSeconds()));
+    .replace("MM",   padZ(d.getUTCMonth() + 1))
+    .replace("DD",   padZ(d.getUTCDate()))
+    .replace("HH",   padZ(d.getUTCHours()))
+    .replace("mm",   padZ(d.getUTCMinutes()))
+    .replace("ss",   padZ(d.getUTCSeconds()));
 }
 
 function formatNumber(val: unknown, decimals?: unknown): string {
@@ -76,40 +77,45 @@ function formatTruncate(val: unknown, length: unknown): string {
   const s = String(val);
   const len = Number(length);
   if (s.length <= len) return s;
-  return s.slice(0, len) + "…"; // …
+  return s.slice(0, len) + "…";
 }
 
 function formatRelative(val: unknown): string {
   if (val == null) return "";
   const d = val instanceof Date ? val : new Date(String(val));
   if (isNaN(d.getTime())) return "";
-  const diffMs = d.getTime() - Date.now();
+  const diffMs  = d.getTime() - Date.now();
   const diffSec = Math.round(diffMs / 1000);
   const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-
   const abs = Math.abs(diffSec);
-  if (abs < 60) return rtf.format(diffSec, "second");
-  if (abs < 3600) return rtf.format(Math.round(diffSec / 60), "minute");
-  if (abs < 86400) return rtf.format(Math.round(diffSec / 3600), "hour");
-  if (abs < 30 * 86400) return rtf.format(Math.round(diffSec / 86400), "day");
-  if (abs < 365 * 86400) return rtf.format(Math.round(diffSec / (30 * 86400)), "month");
-  return rtf.format(Math.round(diffSec / (365 * 86400)), "year");
+  if (abs < 60)           return rtf.format(diffSec, "second");
+  if (abs < 3600)         return rtf.format(Math.round(diffSec / 60), "minute");
+  if (abs < 86400)        return rtf.format(Math.round(diffSec / 3600), "hour");
+  if (abs < 30 * 86400)   return rtf.format(Math.round(diffSec / 86400), "day");
+  if (abs < 365 * 86400)  return rtf.format(Math.round(diffSec / (30 * 86400)), "month");
+  return                       rtf.format(Math.round(diffSec / (365 * 86400)), "year");
 }
 
-registry["date"] = formatDate;
-registry["number"] = formatNumber;
+registry["date"]     = formatDate;
+registry["number"]   = formatNumber;
 registry["currency"] = formatCurrency;
-registry["round"] = formatRound;
-registry["upper"] = formatUpper;
-registry["lower"] = formatLower;
+registry["round"]    = formatRound;
+registry["upper"]    = formatUpper;
+registry["lower"]    = formatLower;
 registry["truncate"] = formatTruncate;
 registry["relative"] = formatRelative;
 
-// ── Path resolution helper ────────────────────────────────────────────────────
+// ── Path helpers ──────────────────────────────────────────────────────────────
 
-function get(obj: Record<string, unknown>, path: string[]): unknown {
+// "." is the self-reference token: get(element, ["."]) === element.
+function parsePath(s: string): string[] {
+  return s === "." ? ["."] : s.split(".");
+}
+
+function get(obj: unknown, path: string[]): unknown {
   let cur: unknown = obj;
   for (const key of path) {
+    if (key === ".") return cur;          // self-reference
     if (cur == null || typeof cur !== "object") return undefined;
     cur = (cur as Record<string, unknown>)[key];
   }
@@ -117,43 +123,61 @@ function get(obj: Record<string, unknown>, path: string[]): unknown {
 }
 
 // ── Argument parser ───────────────────────────────────────────────────────────
-
+//
+// Splits on commas, respects double-quoted strings (spaces inside quotes are
+// preserved). Bare numeric-looking tokens become numbers. Quoted content is
+// always a string.
 function parseArgs(raw: string): unknown[] {
   const results: unknown[] = [];
-  // Split on commas, respecting double-quoted strings
-  const tokens: string[] = [];
-  let current = "";
-  let inQuote = false;
-  for (let i = 0; i < raw.length; i++) {
-    const ch = raw[i];
-    if (ch === '"' && !inQuote) {
-      inQuote = true;
-    } else if (ch === '"' && inQuote) {
-      inQuote = false;
-    } else if (ch === "," && !inQuote) {
-      tokens.push(current.trim());
-      current = "";
-    } else {
-      current += ch;
-    }
-  }
-  if (current.trim() !== "") tokens.push(current.trim());
+  let i = 0;
+  const len = raw.length;
 
-  for (const tok of tokens) {
-    const trimmed = tok.trim();
-    // Strip surrounding double-quotes if present
-    if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-      results.push(trimmed.slice(1, -1));
-      continue;
+  while (i < len) {
+    // skip inter-token whitespace
+    while (i < len && (raw[i] === " " || raw[i] === "\t")) i++;
+    if (i >= len) break;
+
+    let value: unknown;
+
+    if (raw[i] === '"') {
+      // quoted string — capture content verbatim between the quotes
+      i++; // skip opening "
+      const start = i;
+      while (i < len && raw[i] !== '"') i++;
+      value = raw.slice(start, i);
+      if (i < len) i++; // skip closing "
+      while (i < len && (raw[i] === " " || raw[i] === "\t")) i++;
+      if (i < len && raw[i] === ",") i++; // skip separator comma
+    } else {
+      // unquoted: read until comma, trim
+      const start = i;
+      while (i < len && raw[i] !== ",") i++;
+      const tok = raw.slice(start, i).trim();
+      if (i < len) i++; // skip comma
+      value = /^-?\d+(\.\d+)?$/.test(tok) ? Number(tok) : tok;
     }
-    // Numeric?
-    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
-      results.push(Number(trimmed));
-      continue;
-    }
-    results.push(trimmed);
+
+    results.push(value);
   }
+
   return results;
+}
+
+// ── Brace finder ──────────────────────────────────────────────────────────────
+//
+// Finds the first unquoted `}` at or after `start`. This lets placeholder
+// arguments contain `}` inside double-quoted strings without prematurely
+// closing the placeholder, e.g. {join(tags, "{upper(.)}") }.
+function findClosingBrace(template: string, start: number): number {
+  let inQuote = false;
+  for (let i = start; i < template.length; i++) {
+    const ch = template[i];
+    if (ch === '"' && !inQuote) { inQuote = true;  continue; }
+    if (ch === '"' && inQuote)  { inQuote = false; continue; }
+    if (inQuote) continue;
+    if (ch === "}") return i;
+  }
+  return -1;
 }
 
 // ── Template parser ───────────────────────────────────────────────────────────
@@ -187,43 +211,70 @@ function parseTemplate(template: string): Segment[] {
       );
     }
 
-    // Opening brace → start of placeholder
     if (ch === "{") {
-      // Flush accumulated literal
       if (literal !== "") {
         segments.push({ kind: "literal", text: literal });
         literal = "";
       }
-      // Find closing brace
+
       const start = i + 1;
-      const end = template.indexOf("}", start);
+      const end   = findClosingBrace(template, start);
       if (end === -1) {
         throw new Error(
           `Unbalanced opening brace at position ${i} in template: "${template}"`
         );
       }
+
       const inner = template.slice(start, end).trim();
       if (inner === "") {
         throw new Error(`Empty placeholder at position ${i} in template: "${template}"`);
       }
 
-      // Check for formatter call: name(...)
       const callMatch = inner.match(/^(\w+)\s*\((.+)\)$/s);
+
       if (callMatch) {
-        const fnName = callMatch[1];
-        if (!(fnName in registry)) {
+        const fnName   = callMatch[1]!;
+        const fnArgRaw = callMatch[2]!;
+
+        if (fnName === "join") {
+          // join is a compile-time-aware builtin, not a registry formatter.
+          // Classify remaining string args: contains "{" → element template, else → separator.
+          const allArgs = parseArgs(fnArgRaw);
+          const [pathArg, ...restArgs] = allArgs;
+          let elementTemplate: string | null = null;
+          let separator = ", ";
+
+          for (const arg of restArgs) {
+            const s = String(arg);
+            if (s.includes("{")) {
+              elementTemplate = s;
+            } else {
+              separator = s;
+            }
+          }
+
+          segments.push({
+            kind: "join",
+            path: parsePath(String(pathArg)),
+            elementTemplate,
+            separator,
+          });
+        } else if (!(fnName in registry)) {
           throw new Error(
             `Unknown formatter "${fnName}" at position ${i} in template: "${template}"`
           );
+        } else {
+          const allArgs = parseArgs(fnArgRaw);
+          const [pathStr, ...literalArgs] = allArgs as [string, ...unknown[]];
+          segments.push({
+            kind: "call",
+            fn: fnName,
+            path: parsePath(String(pathStr)),
+            args: literalArgs,
+          });
         }
-        const allArgs = parseArgs(callMatch[2]);
-        const [pathStr, ...literalArgs] = allArgs as [string, ...unknown[]];
-        const path = String(pathStr).split(".");
-        segments.push({ kind: "call", fn: fnName, path, args: literalArgs });
       } else {
-        // Plain field path
-        const path = inner.split(".");
-        segments.push({ kind: "field", path });
+        segments.push({ kind: "field", path: parsePath(inner) });
       }
 
       i = end + 1;
@@ -242,17 +293,20 @@ function parseTemplate(template: string): Segment[] {
 }
 
 // ── Code generator ────────────────────────────────────────────────────────────
+//
+// Builds a render function from a parsed segment list.
+// Template-derived values (paths, args, formatter refs, element functions,
+// separators) are stored in closed-over arrays and referenced by index from
+// the generated source — never concatenated into source text (injection-safe,
+// JIT-friendly).
 
-export function compileTemplate(
-  template: string
-): (row: Record<string, unknown>) => string {
-  const segments = parseTemplate(template); // throws on bad syntax / unknown formatter
-
-  // Closed-over arrays; template-derived values never appear in generated source text.
-  const literals: string[] = [];
-  const paths: string[][] = [];
-  const fns: Formatter[] = [];
-  const fnArgs: unknown[][] = [];
+function buildRenderFn(segments: Segment[]): (row: unknown) => string {
+  const literals:    string[]                       = [];
+  const paths:       string[][]                     = [];
+  const fns:         Formatter[]                    = [];
+  const fnArgs:      unknown[][]                    = [];
+  const elementFns:  ((el: unknown) => string)[]    = [];
+  const separators:  string[]                       = [];
 
   const parts: string[] = [];
 
@@ -261,27 +315,74 @@ export function compileTemplate(
       const idx = literals.length;
       literals.push(seg.text);
       parts.push(`literals[${idx}]`);
+
     } else if (seg.kind === "field") {
       const idx = paths.length;
       paths.push(seg.path);
-      parts.push(`(function(){var v=get(row,paths[${idx}]);return v==null?"":String(v);})()`);
-    } else {
+      parts.push(
+        `(function(){var v=get(row,paths[${idx}]);return v==null?"":String(v);})()`
+      );
+
+    } else if (seg.kind === "call") {
       const pIdx = paths.length;
       paths.push(seg.path);
       const fIdx = fns.length;
       fns.push(registry[seg.fn]);
       fnArgs.push(seg.args);
       parts.push(`fns[${fIdx}](get(row,paths[${pIdx}]),...fnArgs[${fIdx}])`);
+
+    } else {
+      // join segment — compile element template once at compile time
+      const pIdx = paths.length;
+      paths.push(seg.path);
+
+      let elFn: (el: unknown) => string;
+
+      if (seg.elementTemplate !== null) {
+        const elSegs = parseTemplate(seg.elementTemplate);
+        if (elSegs.some(s => s.kind === "join")) {
+          throw new Error(
+            `Nested join inside an element template is not allowed: "${seg.elementTemplate}"`
+          );
+        }
+        elFn = buildRenderFn(elSegs);
+      } else {
+        elFn = (el: unknown) => (el == null ? "" : String(el));
+      }
+
+      const eIdx = elementFns.length;
+      elementFns.push(elFn);
+      const sIdx = separators.length;
+      separators.push(seg.separator);
+
+      parts.push(
+        `(function(){` +
+        `var arr=get(row,paths[${pIdx}]);` +
+        `if(!Array.isArray(arr))return "";` +
+        `return arr.map(function(el){return elementFns[${eIdx}](el);}).join(separators[${sIdx}]);` +
+        `})()`
+      );
     }
   }
 
-  const body = parts.length === 0
-    ? `return "";`
-    : `var s=(${parts.join("+")});return s.replace(/\\s+/g," ").trim();`;
+  const body =
+    parts.length === 0
+      ? `return "";`
+      : `var s=(${parts.join("+")});return s.replace(/\\s+/g," ").trim();`;
 
-  // new Function keeps the engine able to JIT the compiled function.
-  // All template-derived data is closed over, not spliced into source.
-  const fn = new Function("literals", "paths", "fns", "fnArgs", "get", `return function render(row){${body}};`);
+  const fn = new Function(
+    "literals", "paths", "fns", "fnArgs", "elementFns", "separators", "get",
+    `return function render(row){${body}};`
+  );
 
-  return fn(literals, paths, fns, fnArgs, get) as (row: Record<string, unknown>) => string;
+  return fn(literals, paths, fns, fnArgs, elementFns, separators, get);
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export function compileTemplate(
+  template: string
+): (row: Record<string, unknown>) => string {
+  const segments = parseTemplate(template);
+  return buildRenderFn(segments) as (row: Record<string, unknown>) => string;
 }

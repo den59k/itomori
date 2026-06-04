@@ -364,6 +364,163 @@ describe("errors", () => {
   });
 });
 
+// ── join builtin ─────────────────────────────────────────────────────────────
+
+describe("formatter: join", () => {
+  // ── Scalar arrays ───────────────────────────────────────────────────────────
+
+  test("scalar array, default separator", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({ tags: ["a", "b", "c"] })).toBe("a, b, c");
+  });
+
+  test("scalar array, custom separator", () => {
+    const render = compileTemplate('{join(tags, " / ")}');
+    expect(render({ tags: ["x", "y", "z"] })).toBe("x / y / z");
+  });
+
+  // ── Self-reference {.} ──────────────────────────────────────────────────────
+
+  test("self-reference: upper formatter on each element", () => {
+    const render = compileTemplate('{join(tags, "{upper(.)}")}');
+    expect(render({ tags: ["foo", "bar", "baz"] })).toBe("FOO, BAR, BAZ");
+  });
+
+  test("self-reference: round formatter with custom separator", () => {
+    const render = compileTemplate('{join(prices, "{round(., 2)}", " / ")}');
+    expect(render({ prices: [9.99, 19.9, 5] })).toBe("9.99 / 19.90 / 5.00");
+  });
+
+  test("self-reference as plain field {.}", () => {
+    const render = compileTemplate('{join(items, "{.}")}');
+    expect(render({ items: ["alpha", "beta"] })).toBe("alpha, beta");
+  });
+
+  // ── Object elements ─────────────────────────────────────────────────────────
+
+  test("object elements, single field, default separator", () => {
+    const render = compileTemplate('{join(users, "{name}")}');
+    const users = [{ name: "Alice" }, { name: "Bob" }, { name: "Carol" }];
+    expect(render({ users })).toBe("Alice, Bob, Carol");
+  });
+
+  test("object elements, single field, custom separator", () => {
+    const render = compileTemplate('{join(users, "{name}", " · ")}');
+    const users = [{ name: "Alice" }, { name: "Bob" }];
+    expect(render({ users })).toBe("Alice · Bob");
+  });
+
+  test("object elements, multiple fields with literal text between", () => {
+    const render = compileTemplate('{join(users, "{firstName} {lastName}")}');
+    const users = [
+      { firstName: "Jane", lastName: "Doe" },
+      { firstName: "John", lastName: "Smith" },
+    ];
+    expect(render({ users })).toBe("Jane Doe, John Smith");
+  });
+
+  test("object element with null lastName → no leftover space inside element", () => {
+    const render = compileTemplate('{join(users, "{firstName} {lastName}")}');
+    const users = [
+      { firstName: "Alice", lastName: "Smith" },
+      { firstName: "Bob", lastName: null },
+    ];
+    expect(render({ users })).toBe("Alice Smith, Bob");
+  });
+
+  test("object element with null firstName → no leading space inside element", () => {
+    const render = compileTemplate('{join(users, "{firstName} {lastName}")}');
+    const users = [{ firstName: null, lastName: "Smith" }];
+    expect(render({ users })).toBe("Smith");
+  });
+
+  // ── Formatter inside element template ───────────────────────────────────────
+
+  test("date formatter inside element template", () => {
+    const render = compileTemplate('{join(orders, "{date(createdAt, DD.MM.YYYY)}")}');
+    const orders = [
+      { createdAt: new Date("2024-01-15T00:00:00Z") },
+      { createdAt: new Date("2024-03-20T00:00:00Z") },
+    ];
+    expect(render({ orders })).toBe("15.01.2024, 20.03.2024");
+  });
+
+  // ── Argument-order independence ─────────────────────────────────────────────
+
+  test("separator before template in arg list gives same result", () => {
+    const r1 = compileTemplate('{join(tags, " / ", "{upper(.)}")}');
+    const r2 = compileTemplate('{join(tags, "{upper(.)}", " / ")}');
+    const row = { tags: ["a", "b", "c"] };
+    expect(r1(row)).toBe("A / B / C");
+    expect(r2(row)).toBe("A / B / C");
+  });
+
+  // ── Edge cases ──────────────────────────────────────────────────────────────
+
+  test("null path → empty string", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({ tags: null })).toBe("");
+  });
+
+  test("undefined path → empty string", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({ tags: undefined })).toBe("");
+  });
+
+  test("missing path → empty string", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({})).toBe("");
+  });
+
+  test("non-array value → empty string", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({ tags: "not-an-array" })).toBe("");
+    expect(render({ tags: 42 })).toBe("");
+    expect(render({ tags: { a: 1 } })).toBe("");
+  });
+
+  test("empty array → empty string", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({ tags: [] })).toBe("");
+  });
+
+  test("array elements that are null/undefined render as empty string", () => {
+    const render = compileTemplate("{join(tags)}");
+    expect(render({ tags: ["a", null, "b", undefined] })).toBe("a, , b,");
+  });
+
+  // ── Mixed template ──────────────────────────────────────────────────────────
+
+  test("template with a normal field and a join", () => {
+    const render = compileTemplate("Name: {name}, Tags: {join(tags)}");
+    expect(render({ name: "Alice", tags: ["x", "y"] })).toBe("Name: Alice, Tags: x, y");
+  });
+
+  // ── Reusability ─────────────────────────────────────────────────────────────
+
+  test("reusable across many rows", () => {
+    const render = compileTemplate('{join(tags, " | ")}');
+    const rows = [
+      { tags: ["a", "b"] },
+      { tags: ["x", "y", "z"] },
+      { tags: [] },
+    ];
+    expect(rows.map(render)).toEqual(["a | b", "x | y | z", ""]);
+  });
+
+  // ── Errors ──────────────────────────────────────────────────────────────────
+
+  test("nested join inside element template → throws at compile time", () => {
+    expect(() => compileTemplate('{join(tags, "{join(items)}")}'))
+      .toThrow(/nested join/i);
+  });
+
+  test("unknown formatter inside element template → throws at compile time", () => {
+    expect(() => compileTemplate('{join(tags, "{ghost(.)}")}'))
+      .toThrow(/ghost/);
+  });
+});
+
 // ── Custom registry ───────────────────────────────────────────────────────────
 
 describe("custom formatter registry", () => {
