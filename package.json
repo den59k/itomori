@@ -1,8 +1,17 @@
 {
-  "name": "lib-2",
+  "name": "itomori",
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "author": "Ваше Имя <your-email@example.com>",
+  "contributors": [
+    "Claude Code <https://anthropic.com>"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/den59k/itomori.git"
+  },
+  "files": [ "dist" ],
   "devDependencies": {
     "@types/bun": "latest"
   },
