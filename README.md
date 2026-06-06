@@ -43,6 +43,14 @@ rows.map(render);
 ```
 Bare numeric-looking args (`2`, `2.5`) become numbers. Quoted args (`"USD"`, `" / "`) are strings and preserve internal spaces.
 
+**Fallback `??`** — fires when the placeholder renders to `""`
+```
+{lastName ?? "—"}
+{currency(price, USD) ?? "n/a"}
+{join(tags, "{name}") ?? "no tags"}
+```
+The RHS must be a quoted string or numeric literal. Field references and chained fallbacks (`??` chains) are not supported and throw at compile time. Note: a field whose legitimate value is `""` also triggers the fallback — for display purposes `""` and null/missing are treated alike.
+
 **Escaping**
 ```
 {{   →  literal {
@@ -118,6 +126,8 @@ Null/undefined fields inside element templates follow the same `""` rule and whi
 - Non-first formatter args referencing fields — they are literals only.
 - Nested formatter calls such as `{upper(date(ts))}`.
 - Nested `join` inside an element template (throws at compile time).
+- Field or formatter references as a `??` fallback RHS — literals only (throws at compile time).
+- Chained fallbacks such as `{a ?? b ?? c}` (throws at compile time).
 
 ## Tests
 

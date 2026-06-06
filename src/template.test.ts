@@ -521,6 +521,147 @@ describe("formatter: join", () => {
   });
 });
 
+// ── ?? fallback operator ──────────────────────────────────────────────────────
+
+describe("?? fallback operator", () => {
+  // ── Bare field ──────────────────────────────────────────────────────────────
+
+  test("null field triggers fallback", () => {
+    const render = compileTemplate('{lastName ?? "—"}');
+    expect(render({ lastName: null })).toBe("—");
+  });
+
+  test("undefined field triggers fallback", () => {
+    const render = compileTemplate('{lastName ?? "—"}');
+    expect(render({ lastName: undefined })).toBe("—");
+  });
+
+  test("missing field triggers fallback", () => {
+    const render = compileTemplate('{lastName ?? "—"}');
+    expect(render({})).toBe("—");
+  });
+
+  test("present field does not trigger fallback", () => {
+    const render = compileTemplate('{lastName ?? "—"}');
+    expect(render({ lastName: "Smith" })).toBe("Smith");
+  });
+
+  // Side effect: a field whose value is "" also triggers the fallback, because
+  // the operator fires on rendered output == "" (not on raw null/undefined only).
+  test("empty-string field value triggers fallback", () => {
+    const render = compileTemplate('{name ?? "anon"}');
+    expect(render({ name: "" })).toBe("anon");
+  });
+
+  // ── Formatter fallback ──────────────────────────────────────────────────────
+
+  test("formatter with null value triggers fallback", () => {
+    const render = compileTemplate('{currency(value, USD) ?? "—"}');
+    expect(render({ value: null })).toBe("—");
+  });
+
+  test("formatter with real value does not trigger fallback", () => {
+    const render = compileTemplate('{currency(value, USD) ?? "—"}');
+    const result = render({ value: 1234.5 });
+    expect(result).toContain("$");
+    expect(result).toContain("1,234.50");
+  });
+
+  test("date formatter with null triggers fallback", () => {
+    const render = compileTemplate('{date(createdAt, DD.MM.YYYY) ?? "n/a"}');
+    expect(render({ createdAt: null })).toBe("n/a");
+    expect(render({ createdAt: new Date("2024-03-15T00:00:00Z") })).toBe("15.03.2024");
+  });
+
+  // ── Join fallback ───────────────────────────────────────────────────────────
+
+  test("join with empty array triggers fallback", () => {
+    const render = compileTemplate('{join(tags) ?? "no tags"}');
+    expect(render({ tags: [] })).toBe("no tags");
+  });
+
+  test("join with null path triggers fallback", () => {
+    const render = compileTemplate('{join(tags) ?? "no tags"}');
+    expect(render({ tags: null })).toBe("no tags");
+  });
+
+  test("join with missing path triggers fallback", () => {
+    const render = compileTemplate('{join(tags) ?? "no tags"}');
+    expect(render({})).toBe("no tags");
+  });
+
+  test("join with non-empty array does not trigger fallback", () => {
+    const render = compileTemplate('{join(tags) ?? "no tags"}');
+    expect(render({ tags: ["a", "b"] })).toBe("a, b");
+  });
+
+  // ── Numeric fallback ────────────────────────────────────────────────────────
+
+  test("numeric fallback literal renders as its string form", () => {
+    const render = compileTemplate('{a ?? 0}');
+    expect(render({})).toBe("0");
+    expect(render({ a: "42" })).toBe("42");
+  });
+
+  // ── Whitespace collapse ─────────────────────────────────────────────────────
+
+  test("fallback literal passes through final collapse/trim", () => {
+    const render = compileTemplate('prefix {name ?? "  spaced  "} suffix');
+    expect(render({})).toBe("prefix spaced suffix");
+  });
+
+  // ── Mixed template ──────────────────────────────────────────────────────────
+
+  test("normal field next to fallback field", () => {
+    const render = compileTemplate('{firstName} {lastName ?? "—"}');
+    expect(render({ firstName: "Alice", lastName: null })).toBe("Alice —");
+    expect(render({ firstName: "Alice", lastName: "Smith" })).toBe("Alice Smith");
+  });
+
+  // ── Inside join element template ────────────────────────────────────────────
+
+  test("fallback inside join element template", () => {
+    const render = compileTemplate('{join(users, "{name ?? \\"anon\\"}")}');
+    const users = [{ name: "Alice" }, { name: null }, { name: "Bob" }, {}];
+    expect(render({ users })).toBe("Alice, anon, Bob, anon");
+  });
+
+  // ── ?? inside a quoted arg is NOT the operator ──────────────────────────────
+
+  test("?? inside a quoted formatter arg is not treated as fallback operator", () => {
+    const render = compileTemplate('{date(ts, "DD ?? MM")}');
+    expect(render({ ts: new Date("2024-03-15T00:00:00Z") })).toBe("15 ?? 03");
+  });
+
+  // ── Reusability ─────────────────────────────────────────────────────────────
+
+  test("reusable across many rows", () => {
+    const render = compileTemplate('{name ?? "anon"} ({role ?? "user"})');
+    const rows = [
+      { name: "Alice", role: "admin" },
+      { name: null,    role: "editor" },
+      { name: "Bob",   role: null },
+      {},
+    ];
+    expect(rows.map(render)).toEqual([
+      "Alice (admin)",
+      "anon (editor)",
+      "Bob (user)",
+      "anon (user)",
+    ]);
+  });
+
+  // ── Compile-time errors ─────────────────────────────────────────────────────
+
+  test("{a ?? b} throws at compile time — field reference as fallback RHS", () => {
+    expect(() => compileTemplate('{a ?? b}')).toThrow();
+  });
+
+  test("{a ?? b ?? c} throws at compile time — chained fallbacks", () => {
+    expect(() => compileTemplate('{a ?? b ?? c}')).toThrow();
+  });
+});
+
 // ── Custom registry ───────────────────────────────────────────────────────────
 
 describe("custom formatter registry", () => {

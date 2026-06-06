@@ -5,9 +5,9 @@ type Formatter = (value: unknown, ...args: unknown[]) => string;
 export const registry: Record<string, Formatter> = {};
 
 type LiteralSegment = { kind: "literal"; text: string };
-type FieldSegment   = { kind: "field";   path: string[] };
-type CallSegment    = { kind: "call";    fn: string; path: string[]; args: unknown[] };
-type JoinSegment    = { kind: "join";    path: string[]; elementTemplate: string | null; separator: string };
+type FieldSegment   = { kind: "field";   path: string[]; fallback?: string };
+type CallSegment    = { kind: "call";    fn: string; path: string[]; args: unknown[]; fallback?: string };
+type JoinSegment    = { kind: "join";    path: string[]; elementTemplate: string | null; separator: string; fallback?: string };
 type Segment = LiteralSegment | FieldSegment | CallSegment | JoinSegment;
 
 // ── Built-in formatters ───────────────────────────────────────────────────────
@@ -140,11 +140,20 @@ function parseArgs(raw: string): unknown[] {
     let value: unknown;
 
     if (raw[i] === '"') {
-      // quoted string — capture content verbatim between the quotes
+      // quoted string — capture content between the quotes; \" is an escaped quote
       i++; // skip opening "
-      const start = i;
-      while (i < len && raw[i] !== '"') i++;
-      value = raw.slice(start, i);
+      let content = "";
+      while (i < len) {
+        if (raw[i] === '\\' && i + 1 < len && raw[i + 1] === '"') {
+          content += '"';
+          i += 2;
+        } else if (raw[i] === '"') {
+          break;
+        } else {
+          content += raw[i++];
+        }
+      }
+      value = content;
       if (i < len) i++; // skip closing "
       while (i < len && (raw[i] === " " || raw[i] === "\t")) i++;
       if (i < len && raw[i] === ",") i++; // skip separator comma
@@ -172,12 +181,54 @@ function findClosingBrace(template: string, start: number): number {
   let inQuote = false;
   for (let i = start; i < template.length; i++) {
     const ch = template[i];
+    if (ch === '\\' && inQuote && i + 1 < template.length && template[i + 1] === '"') {
+      i++; // skip escaped quote inside a quoted string
+      continue;
+    }
     if (ch === '"' && !inQuote) { inQuote = true;  continue; }
     if (ch === '"' && inQuote)  { inQuote = false; continue; }
     if (inQuote) continue;
     if (ch === "}") return i;
   }
   return -1;
+}
+
+// Returns the index of the first top-level `??` in s — outside quotes and
+// outside parentheses — or -1 if not found.
+function findTopLevelQQ(s: string): number {
+  let inQuote = false;
+  let depth = 0;
+  for (let i = 0; i < s.length - 1; i++) {
+    const ch = s[i];
+    if (ch === '\\' && inQuote && s[i + 1] === '"') { i++; continue; }
+    if (ch === '"' && !inQuote) { inQuote = true;  continue; }
+    if (ch === '"' && inQuote)  { inQuote = false; continue; }
+    if (inQuote) continue;
+    if (ch === '(') { depth++; continue; }
+    if (ch === ')') { depth--; continue; }
+    if (depth === 0 && ch === '?' && s[i + 1] === '?') return i;
+  }
+  return -1;
+}
+
+// Validates and extracts the fallback literal from the RHS of `??`.
+// Accepts a double-quoted string or a numeric literal; throws otherwise.
+function parseFallbackLiteral(raw: string, template: string): string {
+  const s = raw.trim();
+  if (s.startsWith('"') && s.endsWith('"') && s.length >= 2) {
+    return s.slice(1, -1);
+  }
+  if (/^-?\d+(\.\d+)?$/.test(s)) {
+    return s;
+  }
+  if (s.includes('??')) {
+    throw new Error(
+      `Chained ?? fallbacks are not supported in template: "${template}"`
+    );
+  }
+  throw new Error(
+    `Fallback RHS must be a quoted string or numeric literal, got: "${s}" in template: "${template}"`
+  );
 }
 
 // ── Template parser ───────────────────────────────────────────────────────────
@@ -230,7 +281,14 @@ function parseTemplate(template: string): Segment[] {
         throw new Error(`Empty placeholder at position ${i} in template: "${template}"`);
       }
 
-      const callMatch = inner.match(/^(\w+)\s*\((.+)\)$/s);
+      // Split on top-level `??` before parsing the expression.
+      const qqIdx = findTopLevelQQ(inner);
+      const exprPart = qqIdx === -1 ? inner : inner.slice(0, qqIdx).trim();
+      const fallback = qqIdx === -1
+        ? undefined
+        : parseFallbackLiteral(inner.slice(qqIdx + 2), template);
+
+      const callMatch = exprPart.match(/^(\w+)\s*\((.+)\)$/s);
 
       if (callMatch) {
         const fnName   = callMatch[1]!;
@@ -258,6 +316,7 @@ function parseTemplate(template: string): Segment[] {
             path: parsePath(String(pathArg)),
             elementTemplate,
             separator,
+            fallback,
           });
         } else if (!(fnName in registry)) {
           throw new Error(
@@ -271,10 +330,11 @@ function parseTemplate(template: string): Segment[] {
             fn: fnName,
             path: parsePath(String(pathStr)),
             args: literalArgs,
+            fallback,
           });
         }
       } else {
-        segments.push({ kind: "field", path: parsePath(inner) });
+        segments.push({ kind: "field", path: parsePath(exprPart), fallback });
       }
 
       i = end + 1;
@@ -307,6 +367,7 @@ function buildRenderFn(segments: Segment[]): (row: unknown) => string {
   const fnArgs:      unknown[][]                    = [];
   const elementFns:  ((el: unknown) => string)[]    = [];
   const separators:  string[]                       = [];
+  const fallbacks:   string[]                       = [];
 
   const parts: string[] = [];
 
@@ -319,9 +380,18 @@ function buildRenderFn(segments: Segment[]): (row: unknown) => string {
     } else if (seg.kind === "field") {
       const idx = paths.length;
       paths.push(seg.path);
-      parts.push(
-        `(function(){var v=get(row,paths[${idx}]);return v==null?"":String(v);})()`
-      );
+      if (seg.fallback !== undefined) {
+        const fbIdx = fallbacks.length;
+        fallbacks.push(seg.fallback);
+        parts.push(
+          `(function(){var _v=get(row,paths[${idx}]);var v=_v==null?"":String(_v);` +
+          `return v===""?fallbacks[${fbIdx}]:v;})()`
+        );
+      } else {
+        parts.push(
+          `(function(){var v=get(row,paths[${idx}]);return v==null?"":String(v);})()`
+        );
+      }
 
     } else if (seg.kind === "call") {
       const pIdx = paths.length;
@@ -329,7 +399,16 @@ function buildRenderFn(segments: Segment[]): (row: unknown) => string {
       const fIdx = fns.length;
       fns.push(registry[seg.fn]!);
       fnArgs.push(seg.args);
-      parts.push(`fns[${fIdx}](get(row,paths[${pIdx}]),...fnArgs[${fIdx}])`);
+      if (seg.fallback !== undefined) {
+        const fbIdx = fallbacks.length;
+        fallbacks.push(seg.fallback);
+        parts.push(
+          `(function(){var v=fns[${fIdx}](get(row,paths[${pIdx}]),...fnArgs[${fIdx}]);` +
+          `return v===""?fallbacks[${fbIdx}]:v;})()`
+        );
+      } else {
+        parts.push(`fns[${fIdx}](get(row,paths[${pIdx}]),...fnArgs[${fIdx}])`);
+      }
 
     } else {
       // join segment — compile element template once at compile time
@@ -355,13 +434,26 @@ function buildRenderFn(segments: Segment[]): (row: unknown) => string {
       const sIdx = separators.length;
       separators.push(seg.separator);
 
-      parts.push(
-        `(function(){` +
-        `var arr=get(row,paths[${pIdx}]);` +
-        `if(!Array.isArray(arr))return "";` +
-        `return arr.map(function(el){return elementFns[${eIdx}](el);}).join(separators[${sIdx}]);` +
-        `})()`
-      );
+      if (seg.fallback !== undefined) {
+        const fbIdx = fallbacks.length;
+        fallbacks.push(seg.fallback);
+        parts.push(
+          `(function(){` +
+          `var arr=get(row,paths[${pIdx}]);` +
+          `if(!Array.isArray(arr))return fallbacks[${fbIdx}];` +
+          `var v=arr.map(function(el){return elementFns[${eIdx}](el);}).join(separators[${sIdx}]);` +
+          `return v===""?fallbacks[${fbIdx}]:v;` +
+          `})()`
+        );
+      } else {
+        parts.push(
+          `(function(){` +
+          `var arr=get(row,paths[${pIdx}]);` +
+          `if(!Array.isArray(arr))return "";` +
+          `return arr.map(function(el){return elementFns[${eIdx}](el);}).join(separators[${sIdx}]);` +
+          `})()`
+        );
+      }
     }
   }
 
@@ -371,11 +463,11 @@ function buildRenderFn(segments: Segment[]): (row: unknown) => string {
       : `var s=(${parts.join("+")});return s.replace(/\\s+/g," ").trim();`;
 
   const fn = new Function(
-    "literals", "paths", "fns", "fnArgs", "elementFns", "separators", "get",
+    "literals", "paths", "fns", "fnArgs", "elementFns", "separators", "fallbacks", "get",
     `return function render(row){${body}};`
   );
 
-  return fn(literals, paths, fns, fnArgs, elementFns, separators, get);
+  return fn(literals, paths, fns, fnArgs, elementFns, separators, fallbacks, get);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
