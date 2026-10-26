@@ -241,6 +241,146 @@ describe("formatter: date — time zone", () => {
   });
 });
 
+describe("formatter: date — day without zero and month names", () => {
+  const d = new Date(2024, 2, 5, 18, 0); // 5 March, local time
+
+  afterEach(() => setDefaults({ locale: "en-US", timeZone: "local" }));
+
+  test("D is the day without a leading zero", () => {
+    expect(compileTemplate("{date(ts, D.MM)}")({ ts: d })).toBe("5.03");
+    expect(compileTemplate("{date(ts, DD.MM)}")({ ts: d })).toBe("05.03");
+  });
+
+  test("MMMM is the long month name, MMM the short one (default locale en-US)", () => {
+    expect(compileTemplate("{date(ts, D MMMM YYYY)}")({ ts: d })).toBe("5 March 2024");
+    expect(compileTemplate("{date(ts, D MMM)}")({ ts: d })).toBe("5 Mar");
+  });
+
+  test("MM next to MMMM stays numeric", () => {
+    expect(compileTemplate("{date(ts, MM MMMM)}")({ ts: d })).toBe("03 March");
+  });
+
+  test("names follow the default locale", () => {
+    setDefaults({ locale: "ru-RU" });
+    expect(compileTemplate('{date(ts, "D MMMM, HH:mm")}')({ ts: d })).toBe("5 марта, 18:00");
+    expect(compileTemplate("{date(ts, D MMM)}")({ ts: d })).toBe("5 мар.");
+  });
+
+  test("with a day in the format the month takes the form used next to a number", () => {
+    // Russian declines it: «5 марта», but «март 2024» on its own.
+    setDefaults({ locale: "ru-RU" });
+    expect(compileTemplate("{date(ts, D MMMM)}")({ ts: d })).toBe("5 марта");
+    expect(compileTemplate("{date(ts, MMMM YYYY)}")({ ts: d })).toBe("март 2024");
+  });
+
+  test("the name is taken in the template's zone", () => {
+    // 31 March 21:30 UTC is already 1 April in Moscow.
+    const ts = Date.UTC(2024, 2, 31, 21, 30);
+    expect(compileTemplate("{date(ts, D MMMM, UTC)}")({ ts })).toBe("31 March");
+    expect(compileTemplate("{date(ts, D MMMM, Europe/Moscow)}")({ ts })).toBe("1 April");
+  });
+
+  test("the name is taken in the default zone", () => {
+    setDefaults({ timeZone: "Europe/Moscow" });
+    expect(compileTemplate("{date(ts, D MMMM)}")({ ts: Date.UTC(2024, 2, 31, 21, 30) })).toBe("1 April");
+  });
+
+  test("names are Gregorian, matching MM, even where the locale's calendar isn't", () => {
+    // fa-IR defaults to the Persian calendar, where 5 March 2024 falls in اسفند.
+    setDefaults({ locale: "fa-IR" });
+    expect(compileTemplate("{date(ts, MM MMMM)}")({ ts: d })).toBe("03 مارس");
+  });
+});
+
+// ── Zones with daylight saving time ──────────────────────────────────────────
+//
+// Zone offsets are cached per day, so these compare `date` with Intl itself
+// across the days where the offset changes.
+
+describe("formatter: date — daylight saving time", () => {
+  const reference = (ts: number, timeZone: string): string => {
+    const p: Record<string, string> = {};
+    const f = new Intl.DateTimeFormat("en-US", {
+      timeZone, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    for (const { type, value } of f.formatToParts(ts)) p[type] = value;
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+  };
+  const sweep = (timeZone: string, from: number, to: number, stepMs: number): string[] => {
+    const render = compileTemplate(`{date(ts, "YYYY-MM-DD HH:mm:ss", "${timeZone}")}`);
+    const wrong: string[] = [];
+    for (let ts = from; ts < to; ts += stepMs) {
+      const got = render({ ts }), want = reference(ts, timeZone);
+      if (got !== want) wrong.push(`${new Date(ts).toISOString()}: ${got} ≠ ${want}`);
+    }
+    return wrong;
+  };
+  const MIN = 60_000, DAY = 86_400_000;
+
+  test("spring forward: 01:59 EST is followed by 03:00 EDT", () => {
+    const render = compileTemplate("{date(ts, HH:mm, America/New_York)}");
+    expect(render({ ts: Date.UTC(2024, 2, 10, 6, 59) })).toBe("01:59");
+    expect(render({ ts: Date.UTC(2024, 2, 10, 7, 0) })).toBe("03:00");
+  });
+
+  test("fall back: 01:30 happens twice", () => {
+    const render = compileTemplate("{date(ts, HH:mm, America/New_York)}");
+    expect(render({ ts: Date.UTC(2024, 10, 3, 5, 30) })).toBe("01:30"); // EDT
+    expect(render({ ts: Date.UTC(2024, 10, 3, 6, 30) })).toBe("01:30"); // EST
+  });
+
+  test("matches Intl minute by minute around both switches in New York", () => {
+    expect(sweep("America/New_York", Date.UTC(2024, 2, 9), Date.UTC(2024, 2, 12), 7 * MIN)).toEqual([]);
+    expect(sweep("America/New_York", Date.UTC(2024, 9, 31), Date.UTC(2024, 10, 5), 7 * MIN)).toEqual([]);
+  });
+
+  test("matches Intl for a whole year in zones with odd offsets and half-hour DST", () => {
+    for (const zone of ["America/New_York", "Australia/Lord_Howe", "Asia/Kathmandu", "Europe/Moscow"]) {
+      expect(sweep(zone, Date.UTC(2024, 0, 1), Date.UTC(2025, 0, 1), 97 * MIN)).toEqual([]);
+    }
+  });
+
+  test("the same day in two zones doesn't mix their offsets", () => {
+    const ts = Date.UTC(2024, 6, 1, 12, 0);
+    expect(compileTemplate("{date(ts, HH:mm, Europe/Moscow)}")({ ts })).toBe("15:00");
+    expect(compileTemplate("{date(ts, HH:mm, America/New_York)}")({ ts })).toBe("08:00");
+    expect(compileTemplate("{date(ts, HH:mm, Europe/Moscow)}")({ ts })).toBe("15:00");
+  });
+
+  test("stays right across more distinct days than the cache keeps", () => {
+    // Daily for 40 years: well past the cache limit, so it is dropped and refilled on the way.
+    expect(sweep("America/New_York", Date.UTC(1990, 0, 1, 7, 13), Date.UTC(2030, 0, 1), DAY)).toEqual([]);
+  });
+});
+
+// ── Cached Intl formatters follow setDefaults ────────────────────────────────
+
+describe("formatter caches follow the default locale", () => {
+  afterEach(() => setDefaults({ locale: "en-US", timeZone: "local" }));
+
+  test("number", () => {
+    const render = compileTemplate("{number(n, 2)}");
+    expect(render({ n: 1234.5 })).toBe("1,234.50");
+    setDefaults({ locale: "ru-RU" });
+    expect(render({ n: 1234.5 })).toBe("1 234,50");
+  });
+
+  test("currency", () => {
+    const render = compileTemplate("{currency(p, RUB)}");
+    expect(render({ p: 800 })).toBe("RUB 800.00");
+    setDefaults({ locale: "ru-RU" });
+    expect(render({ p: 800 })).toBe("800,00 ₽");
+  });
+
+  test("month names", () => {
+    const render = compileTemplate("{date(ts, D MMMM)}");
+    expect(render({ ts: new Date(2024, 2, 5) })).toBe("5 March");
+    setDefaults({ locale: "ru-RU" });
+    expect(render({ ts: new Date(2024, 2, 5) })).toBe("5 марта");
+  });
+});
+
 describe("formatter: number", () => {
   test("no decimals arg → no fractional part", () => {
     const render = compileTemplate("{number(amount)}");

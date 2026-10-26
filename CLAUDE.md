@@ -67,9 +67,19 @@ A formatter may carry `validate(literalArgs)`. `parseTemplate` calls it once per
 
 ### Defaults
 
-`setDefaults({ locale?, timeZone? })` sets process-wide values the formatters read at **render** time (`current` in `src/template.ts`; `defaults` is its read-only view). It validates every key before assigning any. `timeZone` is `"local"` (start value), `"UTC"` or an IANA name; a zone written in a template wins. `locale` (start: `"en-US"`) feeds `number`, `currency` and `relative`.
+`setDefaults({ locale?, timeZone? })` sets process-wide values the formatters read at **render** time (`current` in `src/template.ts`; `defaults` is its read-only view). It validates every key before assigning any. `timeZone` is `"local"` (start value), `"UTC"` or an IANA name; a zone written in a template wins. `locale` (start: `"en-US"`) feeds month names, `number`, `currency` and `relative`.
 
-`date` reads a value through `toDate` (Date, millisecond number, or string) and splits it into parts with local getters, or with a cached `Intl.DateTimeFormat` per zone (`en-US`, `hourCycle: "h23"`, so parts stay numeric and midnight is `00`). Tests build their fixtures in local time, so they pass in any zone the suite runs in.
+`date` reads a value through `toDate` (Date, millisecond number, or string) and splits it into parts with local getters, or — for a named zone — with UTC getters on the instant shifted by the zone's offset. Tests build their fixtures in local time, so they pass in any zone the suite runs in.
+
+Tokens are matched by one regex, longest first (`MMMM|MMM|MM`, `DD|D`). `MMMM` / `MMM` are resolved only when present, by `monthName` from a table of twelve names per locale, width and "has a day". With a day token the table is built with `day` too, so Intl returns the month in the form used next to a number (Russian genitive «марта», not «март»). The table is Gregorian (`calendar: "gregory"`) so names agree with `MM` even for locales whose calendar is another.
+
+### Performance — Intl is the expensive part
+
+Building an Intl formatter costs ~10 µs, `formatToParts` ~2 µs; the generated glue costs tens of ns. So:
+
+- **Every Intl formatter is cached** by what it depends on: `zoneFormats` (zone), `numberFormats` (locale + options key), `monthNames` (locale + width + has-day). A cache key must include the locale wherever output depends on it — `setDefaults` can change it between renders.
+- **Zoned dates skip Intl on most calls.** `zoneOffset` caches the offset per zone and UTC day when it is the same at both ends of the day; a day with a DST switch is cached as `null` and resolved through Intl per call. The map is cleared at `OFFSETS_LIMIT` entries. The `daylight saving time` tests compare with Intl around switches, over a year in odd zones (Lord Howe's half-hour DST, Kathmandu's +5:45) and across more days than the limit — keep them when touching this.
+- Never construct an Intl object inside a formatter's per-call path.
 
 ## Non-goals — do not add without an explicit decision
 

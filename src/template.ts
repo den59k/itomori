@@ -49,8 +49,12 @@ function toDate(val: unknown): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-// One formatter per zone: building an Intl.DateTimeFormat costs far more than
-// using one. en-US + h23 keeps every part numeric and midnight "00", not "24".
+// Building an Intl formatter costs ~10 µs, calling one well under 1 µs, and
+// asking Intl to split an instant into parts ~2 µs. So every formatter below is
+// built once per key, and zoned dates avoid Intl on most calls altogether.
+
+// One formatter per zone. en-US + h23 keeps every part numeric and midnight
+// "00", not "24".
 const zoneFormats = new Map<string, Intl.DateTimeFormat>();
 
 function zoneFormat(timeZone: string): Intl.DateTimeFormat {
@@ -71,55 +75,130 @@ function assertTimeZone(timeZone: string): void {
   if (timeZone !== LOCAL) zoneFormat(timeZone);
 }
 
-type DateParts = Record<"YYYY" | "MM" | "DD" | "HH" | "mm" | "ss", string>;
+// The zone's offset from UTC at `ms`, straight from Intl.
+function intlOffset(ms: number, timeZone: string): number {
+  const p: Record<string, string> = {};
+  for (const { type, value } of zoneFormat(timeZone).formatToParts(ms)) p[type] = value;
+  const wall = Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute), Number(p.second));
+  return wall - Math.floor(ms / 1000) * 1000;
+}
+
+// Offsets cached per zone and UTC day. When the offset is the same at both ends
+// of a day it holds for the whole day; a day with a DST switch is stored as null
+// and goes through Intl on every call. Dropped whole once it reaches the limit —
+// a table spans far fewer days than that.
+const DAY_MS = 86_400_000;
+const OFFSETS_LIMIT = 10_000;
+const zoneOffsets = new Map<string, number | null>();
+
+function zoneOffset(ms: number, timeZone: string): number {
+  const day = Math.floor(ms / DAY_MS);
+  const key = `${timeZone}|${day}`;
+  let offset = zoneOffsets.get(key);
+  if (offset === undefined) {
+    const start = intlOffset(day * DAY_MS, timeZone);
+    const end = intlOffset((day + 1) * DAY_MS - 1, timeZone);
+    offset = start === end ? start : null;
+    if (zoneOffsets.size >= OFFSETS_LIMIT) zoneOffsets.clear();
+    zoneOffsets.set(key, offset);
+  }
+  return offset ?? intlOffset(ms, timeZone);
+}
+
+type DateParts = Record<"YYYY" | "MM" | "DD" | "D" | "HH" | "mm" | "ss", string>;
 
 function dateParts(d: Date, timeZone: string): DateParts {
   if (timeZone === LOCAL) {
     return {
-      YYYY: String(d.getFullYear()), MM: padZ(d.getMonth() + 1), DD: padZ(d.getDate()),
+      YYYY: String(d.getFullYear()), MM: padZ(d.getMonth() + 1), DD: padZ(d.getDate()), D: String(d.getDate()),
       HH: padZ(d.getHours()), mm: padZ(d.getMinutes()), ss: padZ(d.getSeconds()),
     };
   }
-  const p: Record<string, string> = {};
-  for (const { type, value } of zoneFormat(timeZone).formatToParts(d)) p[type] = value;
-  return { YYYY: p.year!, MM: p.month!, DD: p.day!, HH: p.hour!, mm: p.minute!, ss: p.second! };
+  // The zone's wall clock, read with the UTC getters.
+  const w = new Date(d.getTime() + zoneOffset(d.getTime(), timeZone));
+  return {
+    YYYY: String(w.getUTCFullYear()), MM: padZ(w.getUTCMonth() + 1), DD: padZ(w.getUTCDate()), D: String(w.getUTCDate()),
+    HH: padZ(w.getUTCHours()), mm: padZ(w.getUTCMinutes()), ss: padZ(w.getUTCSeconds()),
+  };
 }
 
-const DATE_TOKENS = /YYYY|MM|DD|HH|mm|ss/g;
+// A month's name depends only on the month, the locale, the width and whether
+// a day stands next to it — with one, Intl gives the form used next to a number:
+// Russian «5 марта», where alone it is «март». So each combination is twelve
+// names, built once. Gregorian always, to agree with MM even for a locale whose
+// own calendar is another (fa-IR's is Persian).
+const monthNames = new Map<string, string[]>();
+
+function monthName(month: number, width: "long" | "short", withDay: boolean): string {
+  const key = `${current.locale}|${width}|${withDay}`;
+  let names = monthNames.get(key);
+  if (!names) {
+    const f = new Intl.DateTimeFormat(current.locale, {
+      calendar: "gregory", timeZone: "UTC", month: width,
+      ...(withDay ? { day: "numeric" } : {}),
+    });
+    names = Array.from({ length: 12 }, (_, m) =>
+      f.formatToParts(Date.UTC(2024, m, 15)).find((p) => p.type === "month")?.value ?? "");
+    monthNames.set(key, names);
+  }
+  return names[month]!;
+}
+
+// Longest first, so MMMM isn't read as MM + MM, nor DD as D + D.
+const DATE_TOKENS = /YYYY|MMMM|MMM|MM|DD|D|HH|mm|ss/g;
 
 // ── Built-in formatters ───────────────────────────────────────────────────────
 
 function formatDate(val: unknown, fmt: unknown = "YYYY-MM-DD", timeZone?: unknown): string {
   const d = toDate(val);
   if (d === null) return "";
+  const format = String(fmt);
   const parts = dateParts(d, timeZone == null ? current.timeZone : String(timeZone));
-  return String(fmt).replace(DATE_TOKENS, (t) => parts[t as keyof DateParts]);
+  // Only the day tokens contain "D".
+  const withDay = format.includes("D");
+  return format.replace(DATE_TOKENS, (t) =>
+    t === "MMMM" ? monthName(Number(parts.MM) - 1, "long", withDay)
+    : t === "MMM" ? monthName(Number(parts.MM) - 1, "short", withDay)
+    : parts[t as keyof DateParts]);
 }
 formatDate.validate = (args: unknown[]) => {
   if (args[1] != null) assertTimeZone(String(args[1]));
 };
+
+// One NumberFormat per locale and options. `key` names the options; the set of
+// keys is bounded by the literal args written in templates.
+const numberFormats = new Map<string, Intl.NumberFormat>();
+
+function numberFormat(key: string, options: Intl.NumberFormatOptions): Intl.NumberFormat {
+  const k = `${current.locale}|${key}`;
+  let f = numberFormats.get(k);
+  if (!f) {
+    f = new Intl.NumberFormat(current.locale, options);
+    numberFormats.set(k, f);
+  }
+  return f;
+}
 
 function formatNumber(val: unknown, decimals?: unknown): string {
   if (val == null) return "";
   const n = Number(val);
   if (isNaN(n)) return "";
   if (decimals != null) {
-    return n.toLocaleString(current.locale, {
-      minimumFractionDigits: Number(decimals),
-      maximumFractionDigits: Number(decimals),
-    });
+    const digits = Number(decimals);
+    return numberFormat(`number|${digits}`, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(n);
   }
-  return n.toLocaleString(current.locale, { maximumFractionDigits: 0 });
+  return numberFormat("number", { maximumFractionDigits: 0 }).format(n);
 }
 
 function formatCurrency(val: unknown, code: unknown): string {
   if (val == null) return "";
   const n = Number(val);
   if (isNaN(n)) return "";
-  return new Intl.NumberFormat(current.locale, {
-    style: "currency",
-    currency: String(code),
-  }).format(n);
+  const currency = String(code);
+  return numberFormat(`currency|${currency}`, { style: "currency", currency }).format(n);
 }
 
 function formatRound(val: unknown, decimals: unknown = 0): string {

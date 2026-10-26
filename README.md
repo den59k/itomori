@@ -73,7 +73,7 @@ Inside a `join` element template, `.` refers to the array element itself rather 
 
 | Name | Signature | Description | Example |
 |------|-----------|-------------|---------|
-| `date` | `date(field)` / `date(field, format)` / `date(field, format, zone)` | Format a Date, a millisecond timestamp (as `Date.now()` gives) or a date string. Tokens: `YYYY MM DD HH mm ss`, every occurrence replaced. Default format: `YYYY-MM-DD`. Local time unless a zone is given — see [Time zone and locale](#time-zone-and-locale). | `{date(ts, DD.MM.YYYY HH:mm, Europe/Moscow)}` → `16.03.2024 00:30` |
+| `date` | `date(field)` / `date(field, format)` / `date(field, format, zone)` | Format a Date, a millisecond timestamp (as `Date.now()` gives) or a date string. Tokens below. Default format: `YYYY-MM-DD`. Local time unless a zone is given — see [Time zone and locale](#time-zone-and-locale). | `{date(ts, DD.MM.YYYY HH:mm, Europe/Moscow)}` → `16.03.2024 00:30` |
 | `number` | `number(field)` / `number(field, decimals)` | Thousands-grouped number in the default locale (en-US unless changed). Optional fixed decimal places. | `{number(n, 2)}` → `1,234.50` |
 | `currency` | `currency(field, code)` | `Intl.NumberFormat` currency style in the default locale. | `{currency(p, USD)}` → `$1,234.50` |
 | `round` | `round(field)` / `round(field, decimals)` | Round to N decimal places (default 0). Returns fixed-decimal string. | `{round(v, 2)}` → `3.14` |
@@ -81,6 +81,22 @@ Inside a `join` element template, `.` refers to the array element itself rather 
 | `lower` | `lower(field)` | Lowercase. | `{lower(name)}` → `alice` |
 | `truncate` | `truncate(field, length)` | Cut to `length` characters; append `…` if truncated. | `{truncate(d, 5)}` → `Hello…` |
 | `relative` | `relative(field)` | Relative time via `Intl.RelativeTimeFormat` in the default locale (numeric: "auto"). Takes the same values as `date`. Buckets: seconds → minutes → hours → days → months → years. | `{relative(ts)}` → `2 days ago` |
+
+### Date tokens
+
+| Token | Meaning | `5 March 2024, 18:07:09` |
+|---|---|---|
+| `YYYY` | Year | `2024` |
+| `MMMM` | Month name, long | `March` |
+| `MMM` | Month name, short | `Mar` |
+| `MM` | Month, two digits | `03` |
+| `DD` | Day, two digits | `05` |
+| `D` | Day, no leading zero | `5` |
+| `HH` | Hours, 00–23 | `18` |
+| `mm` | Minutes | `07` |
+| `ss` | Seconds | `09` |
+
+Tokens are case-sensitive and every occurrence is replaced; any other text in the format passes through. Month names are in the default locale (see below). When the format has a day token, the name takes the form used next to a number — in Russian `{date(ts, "D MMMM, HH:mm")}` gives `5 марта, 18:07`, while `{date(ts, MMMM YYYY)}` gives `март 2024`.
 
 ## Time zone and locale
 
@@ -92,7 +108,7 @@ Inside a `join` element template, `.` refers to the array element itself rather 
 {date(ts, "DD.MM.YYYY HH:mm", "Europe/Moscow")}
 ```
 
-`setDefaults` changes the zone `date` uses when the template names none, and the locale of `number`, `currency` and `relative`:
+`setDefaults` changes the zone `date` uses when the template names none, and the locale of month names, `number`, `currency` and `relative`:
 
 ```ts
 setDefaults({ locale: "ru-RU", timeZone: "Europe/Moscow" });
