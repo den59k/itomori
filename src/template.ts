@@ -1,6 +1,9 @@
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type Formatter = (value: unknown, ...args: unknown[]) => string;
+type Formatter = ((value: unknown, ...args: unknown[]) => string) & {
+  // Checks the literal args at compile time; throws to reject the template.
+  validate?: (args: unknown[]) => void;
+};
 
 export const registry: Record<string, Formatter> = {};
 
@@ -10,44 +13,110 @@ type CallSegment    = { kind: "call";    fn: string; path: string[]; args: unkno
 type JoinSegment    = { kind: "join";    path: string[]; elementTemplate: string | null; separator: string; fallback?: string };
 type Segment = LiteralSegment | FieldSegment | CallSegment | JoinSegment;
 
-// ── Built-in formatters ───────────────────────────────────────────────────────
+// ── Defaults ──────────────────────────────────────────────────────────────────
+//
+// Process-wide settings the formatters read at render time, so a template
+// compiled before setDefaults() follows it too. `timeZone` is "local", "UTC"
+// or an IANA name; a zone written in a template wins over it.
+
+type Defaults = { locale: string; timeZone: string };
+
+const LOCAL = "local";
+const current: Defaults = { locale: "en-US", timeZone: LOCAL };
+
+export const defaults: Readonly<Defaults> = current;
+
+// Validates everything before changing anything: a bad value throws and leaves
+// the defaults as they were. A key left out keeps its value.
+export function setDefaults(next: Partial<Defaults>): void {
+  if (next.locale !== undefined) Intl.getCanonicalLocales(next.locale);
+  if (next.timeZone !== undefined) assertTimeZone(next.timeZone);
+  if (next.locale !== undefined) current.locale = next.locale;
+  if (next.timeZone !== undefined) current.timeZone = next.timeZone;
+}
+
+// ── Dates ─────────────────────────────────────────────────────────────────────
 
 function padZ(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-function formatDate(val: unknown, fmt: unknown = "YYYY-MM-DD"): string {
-  if (val == null) return "";
-  const d = val instanceof Date ? val : new Date(String(val));
-  if (isNaN(d.getTime())) return "";
-  const format = String(fmt);
-  return format
-    .replace("YYYY", String(d.getUTCFullYear()))
-    .replace("MM",   padZ(d.getUTCMonth() + 1))
-    .replace("DD",   padZ(d.getUTCDate()))
-    .replace("HH",   padZ(d.getUTCHours()))
-    .replace("mm",   padZ(d.getUTCMinutes()))
-    .replace("ss",   padZ(d.getUTCSeconds()));
+// A Date, a millisecond timestamp (what Date.now() and JSON APIs give), or a
+// date string. null when there is no valid instant.
+function toDate(val: unknown): Date | null {
+  if (val == null) return null;
+  const d = val instanceof Date ? val : new Date(typeof val === "number" ? val : String(val));
+  return isNaN(d.getTime()) ? null : d;
 }
+
+// One formatter per zone: building an Intl.DateTimeFormat costs far more than
+// using one. en-US + h23 keeps every part numeric and midnight "00", not "24".
+const zoneFormats = new Map<string, Intl.DateTimeFormat>();
+
+function zoneFormat(timeZone: string): Intl.DateTimeFormat {
+  let f = zoneFormats.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone, hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    zoneFormats.set(timeZone, f);
+  }
+  return f;
+}
+
+// Throws a RangeError naming the zone if Intl doesn't know it.
+function assertTimeZone(timeZone: string): void {
+  if (timeZone !== LOCAL) zoneFormat(timeZone);
+}
+
+type DateParts = Record<"YYYY" | "MM" | "DD" | "HH" | "mm" | "ss", string>;
+
+function dateParts(d: Date, timeZone: string): DateParts {
+  if (timeZone === LOCAL) {
+    return {
+      YYYY: String(d.getFullYear()), MM: padZ(d.getMonth() + 1), DD: padZ(d.getDate()),
+      HH: padZ(d.getHours()), mm: padZ(d.getMinutes()), ss: padZ(d.getSeconds()),
+    };
+  }
+  const p: Record<string, string> = {};
+  for (const { type, value } of zoneFormat(timeZone).formatToParts(d)) p[type] = value;
+  return { YYYY: p.year!, MM: p.month!, DD: p.day!, HH: p.hour!, mm: p.minute!, ss: p.second! };
+}
+
+const DATE_TOKENS = /YYYY|MM|DD|HH|mm|ss/g;
+
+// ── Built-in formatters ───────────────────────────────────────────────────────
+
+function formatDate(val: unknown, fmt: unknown = "YYYY-MM-DD", timeZone?: unknown): string {
+  const d = toDate(val);
+  if (d === null) return "";
+  const parts = dateParts(d, timeZone == null ? current.timeZone : String(timeZone));
+  return String(fmt).replace(DATE_TOKENS, (t) => parts[t as keyof DateParts]);
+}
+formatDate.validate = (args: unknown[]) => {
+  if (args[1] != null) assertTimeZone(String(args[1]));
+};
 
 function formatNumber(val: unknown, decimals?: unknown): string {
   if (val == null) return "";
   const n = Number(val);
   if (isNaN(n)) return "";
   if (decimals != null) {
-    return n.toLocaleString("en-US", {
+    return n.toLocaleString(current.locale, {
       minimumFractionDigits: Number(decimals),
       maximumFractionDigits: Number(decimals),
     });
   }
-  return n.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  return n.toLocaleString(current.locale, { maximumFractionDigits: 0 });
 }
 
 function formatCurrency(val: unknown, code: unknown): string {
   if (val == null) return "";
   const n = Number(val);
   if (isNaN(n)) return "";
-  return new Intl.NumberFormat("en-US", {
+  return new Intl.NumberFormat(current.locale, {
     style: "currency",
     currency: String(code),
   }).format(n);
@@ -81,12 +150,11 @@ function formatTruncate(val: unknown, length: unknown): string {
 }
 
 function formatRelative(val: unknown): string {
-  if (val == null) return "";
-  const d = val instanceof Date ? val : new Date(String(val));
-  if (isNaN(d.getTime())) return "";
+  const d = toDate(val);
+  if (d === null) return "";
   const diffMs  = d.getTime() - Date.now();
   const diffSec = Math.round(diffMs / 1000);
-  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  const rtf = new Intl.RelativeTimeFormat(current.locale, { numeric: "auto" });
   const abs = Math.abs(diffSec);
   if (abs < 60)           return rtf.format(diffSec, "second");
   if (abs < 3600)         return rtf.format(Math.round(diffSec / 60), "minute");
@@ -325,6 +393,13 @@ function parseTemplate(template: string): Segment[] {
         } else {
           const allArgs = parseArgs(fnArgRaw);
           const [pathStr, ...literalArgs] = allArgs as [string, ...unknown[]];
+          try {
+            registry[fnName]!.validate?.(literalArgs);
+          } catch (e) {
+            throw new Error(
+              `Invalid arguments for "${fnName}" at position ${i} in template: "${template}": ${(e as Error).message}`
+            );
+          }
           segments.push({
             kind: "call",
             fn: fnName,

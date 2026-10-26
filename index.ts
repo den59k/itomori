@@ -1,1 +1,1 @@
-export { compileTemplate, registry } from "./src/template.ts";
+export { compileTemplate, registry, defaults, setDefaults } from "./src/template.ts";

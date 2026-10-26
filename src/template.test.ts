@@ -1,5 +1,5 @@
-import { describe, test, expect, beforeEach } from "bun:test";
-import { compileTemplate, registry } from "./template";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { compileTemplate, registry, defaults, setDefaults } from "./template";
 
 // ── Literal ──────────────────────────────────────────────────────────────────
 
@@ -144,7 +144,9 @@ describe("escaped braces", () => {
 // ── Formatters ────────────────────────────────────────────────────────────────
 
 describe("formatter: date", () => {
-  const d = new Date("2024-03-15T10:30:00Z");
+  // Local time is the default, so fixtures are built in local time too: the
+  // expectations then hold in any time zone the suite runs in.
+  const d = new Date(2024, 2, 15, 10, 30);
 
   test("default format YYYY-MM-DD", () => {
     const render = compileTemplate("{date(createdAt)}");
@@ -163,12 +165,79 @@ describe("formatter: date", () => {
 
   test("parses a date string", () => {
     const render = compileTemplate("{date(createdAt)}");
-    expect(render({ createdAt: "2024-03-15" })).toBe("2024-03-15");
+    // No offset in the string → read as local time (a bare "2024-03-15" would be UTC).
+    expect(render({ createdAt: "2024-03-15T10:30:00" })).toBe("2024-03-15");
   });
 
   test("null date → empty string", () => {
     const render = compileTemplate("{date(createdAt)}");
     expect(render({ createdAt: null })).toBe("");
+  });
+
+  test("every occurrence of a token is replaced", () => {
+    const render = compileTemplate('{date(createdAt, "DD.MM (DD)")}');
+    expect(render({ createdAt: d })).toBe("15.03 (15)");
+  });
+});
+
+describe("formatter: date — input values", () => {
+  test("a number is a millisecond timestamp, as Date.now() and JSON APIs give it", () => {
+    const render = compileTemplate("{date(ts, DD.MM.YYYY HH:mm)}");
+    expect(render({ ts: new Date(2024, 2, 15, 10, 30).getTime() })).toBe("15.03.2024 10:30");
+  });
+
+  test("a string with an offset is read as that instant", () => {
+    const render = compileTemplate("{date(ts, DD.MM.YYYY HH:mm, UTC)}");
+    expect(render({ ts: "2024-03-15T13:30:00+03:00" })).toBe("15.03.2024 10:30");
+  });
+
+  test("an unparseable string → empty string", () => {
+    const render = compileTemplate("{date(ts)}");
+    expect(render({ ts: "not a date" })).toBe("");
+  });
+
+  test("NaN → empty string", () => {
+    const render = compileTemplate("{date(ts)}");
+    expect(render({ ts: NaN })).toBe("");
+  });
+});
+
+describe("formatter: date — time zone", () => {
+  // 15 March 21:30:05 UTC is already 16 March 00:30:05 in Moscow.
+  const instant = Date.UTC(2024, 2, 15, 21, 30, 5);
+
+  test("UTC", () => {
+    const render = compileTemplate("{date(ts, DD.MM.YYYY HH:mm:ss, UTC)}");
+    expect(render({ ts: instant })).toBe("15.03.2024 21:30:05");
+  });
+
+  test("an IANA zone, the date rolling over with it", () => {
+    const render = compileTemplate("{date(ts, DD.MM.YYYY HH:mm:ss, Europe/Moscow)}");
+    expect(render({ ts: instant })).toBe("16.03.2024 00:30:05");
+  });
+
+  test("midnight is 00, not 24", () => {
+    const render = compileTemplate("{date(ts, HH:mm, Europe/Moscow)}");
+    expect(render({ ts: Date.UTC(2024, 2, 15, 21, 0, 0) })).toBe("00:00");
+  });
+
+  test("quoted format and zone", () => {
+    const render = compileTemplate('{date(ts, "DD.MM.YYYY HH:mm", "Europe/Moscow")}');
+    expect(render({ ts: instant })).toBe("16.03.2024 00:30");
+  });
+
+  test("local — the same as no zone at all", () => {
+    const local = compileTemplate("{date(ts, DD.MM.YYYY HH:mm:ss, local)}");
+    const none  = compileTemplate("{date(ts, DD.MM.YYYY HH:mm:ss)}");
+    expect(local({ ts: instant })).toBe(none({ ts: instant }));
+  });
+
+  test("an unknown zone throws at compile time, naming it", () => {
+    expect(() => compileTemplate("{date(ts, HH:mm, Mars/Base)}")).toThrow(/Mars\/Base/);
+  });
+
+  test("an unknown zone inside a join element template throws at compile time", () => {
+    expect(() => compileTemplate('{join(orders, "{date(createdAt, HH:mm, Mars/Base)}")}')).toThrow(/Mars\/Base/);
   });
 });
 
@@ -291,6 +360,11 @@ describe("formatter: relative", () => {
     const render = compileTemplate("{relative(ts)}");
     expect(render({ ts: null })).toBe("");
   });
+
+  test("a number is a millisecond timestamp", () => {
+    const render = compileTemplate("{relative(ts)}");
+    expect(render({ ts: Date.now() - 2 * 24 * 60 * 60 * 1000 })).toBe("2 days ago");
+  });
 });
 
 // ── Argument parsing ──────────────────────────────────────────────────────────
@@ -318,7 +392,7 @@ describe("argument parsing", () => {
 
   test("double-quoted string arg", () => {
     const render = compileTemplate('{date(ts, "DD/MM/YYYY")}');
-    expect(render({ ts: new Date("2024-01-05T00:00:00Z") })).toBe("05/01/2024");
+    expect(render({ ts: new Date(2024, 0, 5) })).toBe("05/01/2024");
   });
 });
 
@@ -439,8 +513,8 @@ describe("formatter: join", () => {
   test("date formatter inside element template", () => {
     const render = compileTemplate('{join(orders, "{date(createdAt, DD.MM.YYYY)}")}');
     const orders = [
-      { createdAt: new Date("2024-01-15T00:00:00Z") },
-      { createdAt: new Date("2024-03-20T00:00:00Z") },
+      { createdAt: new Date(2024, 0, 15) },
+      { createdAt: new Date(2024, 2, 20) },
     ];
     expect(render({ orders })).toBe("15.01.2024, 20.03.2024");
   });
@@ -570,7 +644,7 @@ describe("?? fallback operator", () => {
   test("date formatter with null triggers fallback", () => {
     const render = compileTemplate('{date(createdAt, DD.MM.YYYY) ?? "n/a"}');
     expect(render({ createdAt: null })).toBe("n/a");
-    expect(render({ createdAt: new Date("2024-03-15T00:00:00Z") })).toBe("15.03.2024");
+    expect(render({ createdAt: new Date(2024, 2, 15) })).toBe("15.03.2024");
   });
 
   // ── Join fallback ───────────────────────────────────────────────────────────
@@ -630,7 +704,7 @@ describe("?? fallback operator", () => {
 
   test("?? inside a quoted formatter arg is not treated as fallback operator", () => {
     const render = compileTemplate('{date(ts, "DD ?? MM")}');
-    expect(render({ ts: new Date("2024-03-15T00:00:00Z") })).toBe("15 ?? 03");
+    expect(render({ ts: new Date(2024, 2, 15) })).toBe("15 ?? 03");
   });
 
   // ── Reusability ─────────────────────────────────────────────────────────────
@@ -684,5 +758,60 @@ describe("custom formatter registry", () => {
     registry["newFmt"] = () => "new";
     expect(render({ name: "alice" })).toBe("ALICE");
     delete registry["newFmt"];
+  });
+});
+
+// ── Defaults ──────────────────────────────────────────────────────────────────
+
+describe("setDefaults", () => {
+  const instant = Date.UTC(2024, 2, 15, 21, 30, 5); // 00:30 next day in Moscow
+
+  afterEach(() => setDefaults({ locale: "en-US", timeZone: "local" }));
+
+  test("starts at en-US and local time", () => {
+    expect(defaults).toEqual({ locale: "en-US", timeZone: "local" });
+  });
+
+  test("timeZone applies to date when the template names none", () => {
+    setDefaults({ timeZone: "Europe/Moscow" });
+    expect(compileTemplate("{date(ts, DD.MM HH:mm)}")({ ts: instant })).toBe("16.03 00:30");
+  });
+
+  test("is read at render time, so it reaches templates compiled earlier", () => {
+    const render = compileTemplate("{date(ts, HH:mm)}");
+    setDefaults({ timeZone: "UTC" });
+    expect(render({ ts: instant })).toBe("21:30");
+  });
+
+  test("a zone in the template wins over the default", () => {
+    setDefaults({ timeZone: "Europe/Moscow" });
+    expect(compileTemplate("{date(ts, HH:mm, UTC)}")({ ts: instant })).toBe("21:30");
+  });
+
+  test("local in the template means local even under a default zone", () => {
+    const expected = compileTemplate("{date(ts, HH:mm)}")({ ts: instant });
+    setDefaults({ timeZone: "UTC" });
+    expect(compileTemplate("{date(ts, HH:mm, local)}")({ ts: instant })).toBe(expected);
+  });
+
+  test("locale applies to number, currency and relative", () => {
+    setDefaults({ locale: "ru-RU" });
+    // ru groups with a no-break space; the final whitespace collapse makes it a plain one.
+    expect(compileTemplate("{number(n)}")({ n: 1234567 })).toBe("1 234 567");
+    expect(compileTemplate("{currency(p, RUB)}")({ p: 1234.5 })).toBe("1 234,50 ₽");
+    expect(compileTemplate("{relative(ts)}")({ ts: Date.now() - 5 * 24 * 60 * 60 * 1000 })).toBe("5 дней назад");
+  });
+
+  test("leaving a key out keeps its value", () => {
+    setDefaults({ timeZone: "UTC" });
+    setDefaults({ locale: "ru-RU" });
+    expect(defaults).toEqual({ locale: "ru-RU", timeZone: "UTC" });
+  });
+
+  test("an invalid locale or zone throws and changes nothing", () => {
+    expect(() => setDefaults({ locale: "not a locale!" })).toThrow();
+    expect(() => setDefaults({ timeZone: "Mars/Base" })).toThrow(/Mars\/Base/);
+    expect(() => setDefaults({ locale: "ru-RU", timeZone: "Mars/Base" })).toThrow();
+    expect(defaults).toEqual({ locale: "en-US", timeZone: "local" });
   });
 });

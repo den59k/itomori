@@ -28,7 +28,7 @@ Write or extend tests **first**, then implement. Every PR must leave all pre-exi
 
 4. **Whitespace collapse + trim on final output only.** The generated body ends with `s.replace(/\s+/g, " ").trim()`. This runs once on the fully assembled string. Element templates compiled by `join` apply their own collapse internally; the outer template applies it again on the joined result.
 
-5. **Errors at compile time.** `compileTemplate` must throw (not the render function) for: unknown formatter name, unbalanced braces, empty placeholder `{}`, nested `join` inside an element template.
+5. **Errors at compile time.** `compileTemplate` must throw (not the render function) for: unknown formatter name, unbalanced braces, empty placeholder `{}`, nested `join` inside an element template, and formatter args the formatter's `validate` rejects (an unknown time zone in `date`).
 
 ## Architecture
 
@@ -63,6 +63,14 @@ Write or extend tests **first**, then implement. Every PR must leave all pre-exi
 
 `export const registry: Record<string, Formatter>` is mutable. Built-in formatters are registered at module load. A formatter receives `(resolvedValue: unknown, ...literalArgs: unknown[]) => string`. Formatters see a resolved value only — they have no access to the compiler or the row.
 
+A formatter may carry `validate(literalArgs)`. `parseTemplate` calls it once per call site, so bad literal args throw at compile time (invariant 5) with the template in the message.
+
+### Defaults
+
+`setDefaults({ locale?, timeZone? })` sets process-wide values the formatters read at **render** time (`current` in `src/template.ts`; `defaults` is its read-only view). It validates every key before assigning any. `timeZone` is `"local"` (start value), `"UTC"` or an IANA name; a zone written in a template wins. `locale` (start: `"en-US"`) feeds `number`, `currency` and `relative`.
+
+`date` reads a value through `toDate` (Date, millisecond number, or string) and splits it into parts with local getters, or with a cached `Intl.DateTimeFormat` per zone (`en-US`, `hourCycle: "h23"`, so parts stay numeric and midnight is `00`). Tests build their fixtures in local time, so they pass in any zone the suite runs in.
+
 ## Non-goals — do not add without an explicit decision
 
 - Conditionals, logic, or arithmetic inside templates.
@@ -75,5 +83,6 @@ These would reintroduce a full expression language and undermine the JIT and inj
 ## Adding a formatter
 
 1. Write the function: `function formatFoo(val: unknown, ...args: unknown[]): string`. Return `""` immediately when `val == null`.
-2. Register: `registry["foo"] = formatFoo;` (alongside the other registrations near line 99–106 of `src/template.ts`).
-3. Add tests in `src/template.test.ts`: a `describe("formatter: foo", ...)` block covering at minimum the happy path with and without optional args, and the null-input → `""` case.
+2. Register: `registry["foo"] = formatFoo;` (alongside the other registrations in `src/template.ts`).
+3. If an arg can be wrong in a way known before any row arrives, add `formatFoo.validate = (args) => { … }` that throws — the error then surfaces at compile time.
+4. Add tests in `src/template.test.ts`: a `describe("formatter: foo", ...)` block covering at minimum the happy path with and without optional args, and the null-input → `""` case.
